@@ -3,9 +3,6 @@ import type { Handler } from "@netlify/functions";
 import { GoogleGenAI, Part, Content, FunctionDeclaration, Type, Modality } from "@google/genai";
 import * as admin from 'firebase-admin';
 
-// --- CONFIGURAÇÃO DO LIMITE DE USO ---
-const DAILY_LIMIT = 20; // Limite de 20 requisições por usuário, por dia.
-
 // --- INICIALIZAÇÃO DO FIREBASE ADMIN SDK ---
 // Isso só roda uma vez, quando a função "acorda".
 // As credenciais devem ser configuradas como variáveis de ambiente no painel da Netlify.
@@ -22,8 +19,6 @@ if (!admin.apps.length) {
     console.error("Firebase Admin initialization error:", error);
   }
 }
-
-const db = admin.firestore();
 
 
 // --- Tipos Locais para a Função ---
@@ -54,43 +49,40 @@ export const handler: Handler = async (event) => {
         return { statusCode: 405, body: JSON.stringify({ error: 'Method Not Allowed' }) };
     }
     
-    // --- VERIFICAÇÃO DE AUTENTICAÇÃO E LIMITE DE USO ---
+    // --- VERIFICAÇÃO DE AUTENTICAÇÃO ---
     const authorization = event.headers.authorization;
     if (!authorization || !authorization.startsWith('Bearer ')) {
         return { statusCode: 401, body: JSON.stringify({ error: 'Não autorizado. Token de autenticação não fornecido.' }) };
     }
 
     const token = authorization.split('Bearer ')[1];
-    let decodedToken;
+    let uid: string;
     try {
-        decodedToken = await admin.auth().verifyIdToken(token);
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        uid = decodedToken.uid;
     } catch (error) {
         console.error("Token verification failed:", error);
         return { statusCode: 403, body: JSON.stringify({ error: 'Sessão inválida ou expirada. Por favor, faça o login novamente.' }) };
     }
     
-    const uid = decodedToken.uid;
-    const userUsageRef = db.collection('userApiUsage').doc(uid);
-    const today = new Date().toISOString().split('T')[0]; // Data de hoje em formato YYYY-MM-DD
+     // --- VERIFICAÇÃO DE LIMITE DE USO DIÁRIO ---
+    const db = admin.firestore();
+    const DAILY_LIMIT = 20;
+    const today = new Date().toISOString().split('T')[0]; // Formato YYYY-MM-DD
+    const usageDocRef = db.collection('dailyUsage').doc(uid);
 
     try {
-        const userUsageDoc = await userUsageRef.get();
-        if (userUsageDoc.exists) {
-            const data = userUsageDoc.data()!;
-            const lastRequestDate = data.lastRequestTimestamp.toDate().toISOString().split('T')[0];
-
-            if (lastRequestDate === today && data.dailyRequestCount >= DAILY_LIMIT) {
-                return { 
-                    statusCode: 429, // Too Many Requests
-                    body: JSON.stringify({ error: 'Você atingiu seu limite de uso diário. Tente novamente amanhã.' }) 
-                };
+        const usageDoc = await usageDocRef.get();
+        if (usageDoc.exists) {
+            const data = usageDoc.data()!;
+            if (data.lastResetDate === today && data.count >= DAILY_LIMIT) {
+                return { statusCode: 429, body: JSON.stringify({ error: 'Você atingiu seu limite de 20 interações diárias. Por favor, tente novamente amanhã.' }) };
             }
         }
     } catch (dbError) {
-        console.error("Firestore read error:", dbError);
-        return { statusCode: 500, body: JSON.stringify({ error: 'Não foi possível verificar seu limite de uso. Tente novamente.' }) };
+        console.error("Firestore usage check error:", dbError);
+        return { statusCode: 500, body: JSON.stringify({ error: 'Desculpe, não foi possível verificar seu limite de uso no momento. Tente novamente mais tarde.' }) };
     }
-    // --- FIM DA VERIFICAÇÃO ---
 
     const API_KEY = process.env.API_KEY;
     if (!API_KEY) {
@@ -208,21 +200,19 @@ export const handler: Handler = async (event) => {
                 return { statusCode: 400, body: JSON.stringify({ error: "Ação inválida" }) };
         }
         
-        // --- ATUALIZAÇÃO DO CONTADOR DE USO ---
-        // Se a chamada à API foi bem-sucedida, incrementamos o contador do usuário.
-        const doc = await userUsageRef.get();
-        if (doc.exists) {
-            const data = doc.data()!;
-            const lastRequestDate = data.lastRequestTimestamp.toDate().toISOString().split('T')[0];
-            if (lastRequestDate === today) {
-                await userUsageRef.update({ dailyRequestCount: admin.firestore.FieldValue.increment(1), lastRequestTimestamp: admin.firestore.FieldValue.serverTimestamp() });
+         // Incrementa o contador de uso após uma chamada bem-sucedida
+        try {
+            const usageDoc = await usageDocRef.get();
+            if (usageDoc.exists && usageDoc.data()!.lastResetDate === today) {
+                await usageDocRef.update({ count: admin.firestore.FieldValue.increment(1) });
             } else {
-                await userUsageRef.set({ dailyRequestCount: 1, lastRequestTimestamp: admin.firestore.FieldValue.serverTimestamp() }, { merge: true });
+                await usageDocRef.set({ count: 1, lastResetDate: today });
             }
-        } else {
-            await userUsageRef.set({ dailyRequestCount: 1, lastRequestTimestamp: admin.firestore.FieldValue.serverTimestamp() });
+        } catch (dbError) {
+            console.error("Firestore usage update error:", dbError);
+            // Não bloqueia a resposta se a atualização falhar, mas loga o erro.
         }
-        
+
         return { statusCode: 200, body: JSON.stringify(result) };
 
     } catch (error) {
