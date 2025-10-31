@@ -1,0 +1,19 @@
+# Dependências
+/node_modules
+
+# Arquivos de build do Vite
+/dist
+/.vite
+
+# Arquivos de configuração de editores
+.idea
+.vscode
+
+# Variáveis de ambiente
+.env
+.env.*
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

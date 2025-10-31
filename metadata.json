@@ -1,0 +1,7 @@
+{
+  "name": "Hub de Estagiários AI",
+  "description": "Uma plataforma para centralizar e interagir com diferentes personas de IA, cada uma especializada em uma área específica de arquitetura e design.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
