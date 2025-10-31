@@ -1,3 +1,4 @@
+
 import type { Message } from "../types";
 import { auth } from './firebaseService';
 
@@ -13,7 +14,7 @@ async function callProxy(action: string, payload: any) {
         // Gera o token de identificação do usuário
         const token = await user.getIdToken();
 
-        const response = await fetch('/api/gemini-proxy', {
+        const response = await fetch('/.netlify/functions/gemini-proxy', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
