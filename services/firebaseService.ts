@@ -1,8 +1,9 @@
 import { initializeApp } from "firebase/app";
 import { 
-    getAuth, 
-    GoogleAuthProvider, 
-    signInWithPopup, 
+    getAuth,
+    createUserWithEmailAndPassword,
+    signInWithEmailAndPassword,
+    updateProfile,
     signOut, 
     onAuthStateChanged 
 } from "firebase/auth";
@@ -25,17 +26,25 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
-const provider = new GoogleAuthProvider();
 
-// Função para iniciar o login com o popup do Google
-const signInWithGoogle = () => {
-    return signInWithPopup(auth, provider);
+// Função para criar um novo usuário com email, senha e nome de exibição
+const signUpWithEmailPassword = async (email, password, displayName) => {
+    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+    // Após criar o usuário, atualiza o perfil para incluir o nome de exibição
+    await updateProfile(userCredential.user, { displayName });
+    return userCredential;
+};
+
+// Função para fazer login com email e senha
+const signInWithEmailPassword = (email, password) => {
+    return signInWithEmailAndPassword(auth, email, password);
 };
 
 export { 
     auth,
     db,
-    signInWithGoogle, 
+    signUpWithEmailPassword,
+    signInWithEmailPassword,
     signOut, 
     onAuthStateChanged 
 };
