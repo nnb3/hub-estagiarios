@@ -20,7 +20,6 @@ if (!admin.apps.length) {
   }
 }
 
-
 // --- Tipos Locais para a Função ---
 type MessageRole = 'user' | 'model';
 
@@ -65,7 +64,7 @@ export const handler: Handler = async (event) => {
         return { statusCode: 403, body: JSON.stringify({ error: 'Sessão inválida ou expirada. Por favor, faça o login novamente.' }) };
     }
     
-     // --- VERIFICAÇÃO DE LIMITE DE USO DIÁRIO ---
+    // --- VERIFICAÇÃO DE LIMITE DE USO DIÁRIO ---
     const db = admin.firestore();
     const DAILY_LIMIT = 20;
     const today = new Date().toISOString().split('T')[0]; // Formato YYYY-MM-DD
@@ -73,150 +72,127 @@ export const handler: Handler = async (event) => {
 
     try {
         const usageDoc = await usageDocRef.get();
-        if (usageDoc.exists) {
-            const data = usageDoc.data()!;
-            if (data.lastResetDate === today && data.count >= DAILY_LIMIT) {
-                return { statusCode: 429, body: JSON.stringify({ error: 'Você atingiu seu limite de 20 interações diárias. Por favor, tente novamente amanhã.' }) };
-            }
+        const usageData = usageDoc.data();
+        let currentCount = 0;
+
+        if (usageDoc.exists && usageData?.lastUsed === today) {
+            currentCount = usageData.count || 0;
+        }
+
+        if (currentCount >= DAILY_LIMIT) {
+            return {
+                statusCode: 429, // Too Many Requests
+                body: JSON.stringify({ error: 'Você atingiu o limite diário de uso. Por favor, tente novamente amanhã.' }),
+            };
         }
     } catch (dbError) {
-        console.error("Firestore usage check error:", dbError);
-        return { statusCode: 500, body: JSON.stringify({ error: 'Desculpe, não foi possível verificar seu limite de uso no momento. Tente novamente mais tarde.' }) };
-    }
-
-    const API_KEY = process.env.API_KEY;
-    if (!API_KEY) {
-        return { statusCode: 500, body: JSON.stringify({ error: "API_KEY environment variable is not set." }) };
+        console.error("Erro ao verificar o limite de uso no Firestore:", dbError);
+        return {
+            statusCode: 500,
+            body: JSON.stringify({ error: 'Não foi possível verificar seu limite de uso. Tente novamente.' }),
+        };
     }
     
-    const ai = new GoogleGenAI({ apiKey: API_KEY });
-    const model = "gemini-2.5-flash";
-
+    // --- LÓGICA PRINCIPAL DA API ---
+    if (!event.body) {
+        return { statusCode: 400, body: JSON.stringify({ error: 'Request body is missing' }) };
+    }
+    
     try {
-        const { action, payload } = JSON.parse(event.body || '{}');
-        let response;
-        let result;
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const { action, payload } = JSON.parse(event.body);
+        let responseBody: object;
 
         switch (action) {
-            // --- AÇÃO: Transcrever Áudio ---
-            case 'transcribeAudio':
-                const { file: audioFile } = payload;
-                const audioPart: Part = { inlineData: { mimeType: audioFile.mimeType, data: audioFile.data } };
-                const textPart: Part = { text: "Transcreva este áudio na íntegra em português. Retorne apenas o texto transcrito, sem nenhuma formatação, comentários ou introduções adicionais." };
-                response = await ai.models.generateContent({ model, contents: [{ parts: [audioPart, textPart] }] });
-                result = { text: response.text };
-                break;
-
-            // --- AÇÃO: Enviar Mensagem para Estagiário ---
-            case 'sendMessage':
+            case 'sendMessage': {
                 const { internId, systemInstruction, message, history, files } = payload;
-                
-                // Mapeamento e filtragem robustos do histórico
-                const contents: Content[] = history
-                    .filter((msg: Message | null): msg is Message => 
-                        msg != null && 
-                        typeof msg.role === 'string' &&
-                        // FIX: Garante que o conteúdo de texto não seja apenas espaços em branco
-                        ((typeof msg.content === 'string' && msg.content.trim() !== '') || (Array.isArray(msg.files) && msg.files.length > 0))
-                    )
-                    .map((msg: Message) => {
-                        const parts: Part[] = [];
-                        if (msg.content && msg.content.trim() !== '') { 
-                            parts.push({ text: msg.content }); 
-                        }
-                        if (msg.files) {
-                            msg.files.forEach(file => {
-                                if(file && file.mimeType && file.data) {
-                                    parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } });
-                                }
-                            });
-                        }
-                        return { role: msg.role, parts };
-                    }).filter((content: Content) => content.parts.length > 0);
-
-                const userParts: Part[] = [];
-                if (message) { userParts.push({ text: message }); }
-                if (files) {
-                    files.forEach((file: any) => userParts.push({ inlineData: { mimeType: file.mimeType, data: file.data } }));
+                const modelName = ['agnaldo', 'divina'].includes(internId) ? 'gemini-2.5-pro' : 'gemini-2.5-flash';
+                const contents: Content[] = history.map((msg: Message) => ({ role: msg.role, parts: [{ text: msg.content }] }));
+                const userParts: Part[] = [{ text: message }];
+                if (files && files.length > 0) {
+                    files.forEach((file: { mimeType: string; data: string }) => {
+                        userParts.push({ inlineData: { mimeType: file.mimeType, data: file.data } });
+                    });
                 }
-
-                if(userParts.length > 0) {
-                    contents.push({ role: 'user', parts: userParts });
-                }
-
-                // A API Gemini espera que a conversa comece com um 'user'.
-                // Removemos a saudação inicial do modelo para garantir a conformidade.
-                if (contents.length > 0 && contents[0].role === 'model') {
-                    contents.shift();
-                }
-
-                if (internId === 'magnolia') {
-                    const firstResponse = await ai.models.generateContent({ model, contents, config: { systemInstruction, tools: [{ functionDeclarations: calendarTools }] } });
-                    const functionCalls = firstResponse.functionCalls;
-                    if (functionCalls && functionCalls.length > 0) {
-                        contents.push(firstResponse.candidates![0].content);
-                        const functionResponses: Part[] = functionCalls.map(fc => ({ functionResponse: { name: fc.name, response: { success: true } } }));
-                        contents.push({ role: 'tool', parts: functionResponses });
-                        const finalResponse = await ai.models.generateContent({ model, contents, config: { systemInstruction, tools: [{ functionDeclarations: calendarTools }] } });
-                        result = { text: finalResponse.text };
-                    } else {
-                        result = { text: firstResponse.text };
+                contents.push({ role: 'user', parts: userParts });
+                const response = await ai.models.generateContent({
+                    model: modelName,
+                    contents,
+                    config: {
+                      systemInstruction,
+                      tools: internId === 'magnolia' ? [{ functionDeclarations: calendarTools }] : undefined,
                     }
-                } else {
-                    const geminiResponse = await ai.models.generateContent({ model, contents, config: { systemInstruction } });
-                    result = { text: geminiResponse.text };
-                }
-                break;
-
-            // --- AÇÃO: Gerar Imagem (Moodboard/Textura) ---
-            case 'generateImage':
-                const { prompt: imagePrompt } = payload;
-                response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash-image',
-                    contents: [{ parts: [{ text: imagePrompt }] }],
-                    config: { responseModalities: [Modality.IMAGE] },
                 });
-                const generatedImageBase64 = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-                if (!generatedImageBase64) throw new Error("Image generation failed.");
-                result = { base64: generatedImageBase64, mimeType: 'image/png' };
+                responseBody = { text: response.text };
                 break;
-
-            // --- AÇÃO: Editar Imagem ---
-            case 'editImage':
-                const { prompt: editPrompt, files: editFiles } = payload;
-                const editParts: Part[] = editFiles.map((file: any) => ({ inlineData: { data: file.data, mimeType: file.mimeType } }));
-                editParts.push({ text: editPrompt });
-                response = await ai.models.generateContent({
-                    model: 'gemini-2.5-flash-image',
-                    contents: [{ parts: editParts }],
-                    config: { responseModalities: [Modality.IMAGE] },
-                });
-                const editedImageBase64 = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData)?.inlineData?.data;
-                if (!editedImageBase64) throw new Error("Image editing failed.");
-                result = { base64: editedImageBase64, mimeType: editFiles[0].mimeType };
-                break;
-
-            default:
-                return { statusCode: 400, body: JSON.stringify({ error: "Ação inválida" }) };
-        }
-        
-         // Incrementa o contador de uso após uma chamada bem-sucedida
-        try {
-            const usageDoc = await usageDocRef.get();
-            if (usageDoc.exists && usageDoc.data()!.lastResetDate === today) {
-                await usageDocRef.update({ count: admin.firestore.FieldValue.increment(1) });
-            } else {
-                await usageDocRef.set({ count: 1, lastResetDate: today });
             }
-        } catch (dbError) {
-            console.error("Firestore usage update error:", dbError);
-            // Não bloqueia a resposta se a atualização falhar, mas loga o erro.
+            case 'transcribeAudio': {
+                const { file } = payload;
+                const response = await ai.models.generateContent({
+                  model: 'gemini-2.5-flash',
+                  contents: { parts: [{ text: "Transcreva o seguinte áudio para português brasileiro:" }, { inlineData: { mimeType: file.mimeType, data: file.data } }] },
+                });
+                responseBody = { text: response.text };
+                break;
+            }
+            case 'generateImage': {
+                const { prompt } = payload;
+                const response = await ai.models.generateImages({
+                    model: 'imagen-4.0-generate-001',
+                    prompt,
+                    config: { numberOfImages: 1, outputMimeType: 'image/png', aspectRatio: '1:1' }
+                });
+                if (!response.generatedImages || response.generatedImages.length === 0) throw new Error("A API não retornou nenhuma imagem.");
+                const base64Image = response.generatedImages[0].image.imageBytes;
+                responseBody = { base64: base64Image, mimeType: 'image/png' };
+                break;
+            }
+            case 'editImage': {
+                const { prompt, files } = payload;
+                if (!files || files.length === 0) throw new Error("Nenhum arquivo de imagem fornecido para edição.");
+                const imagePart = { inlineData: { mimeType: files[0].mimeType, data: files[0].data } };
+                const textPart = { text: prompt };
+                const response = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash-image',
+                    contents: { parts: [imagePart, textPart] },
+                    config: { responseModalities: [Modality.IMAGE] },
+                });
+                let base64Image = '';
+                for (const part of response.candidates?.[0]?.content?.parts || []) {
+                    if (part.inlineData) {
+                        base64Image = part.inlineData.data;
+                        break;
+                    }
+                }
+                if (!base64Image) throw new Error("A API não retornou uma imagem editada.");
+                responseBody = { base64: base64Image, mimeType: 'image/png' };
+                break;
+            }
+            default:
+                return { statusCode: 400, body: JSON.stringify({ error: `Ação desconhecida: ${action}` }) };
         }
 
-        return { statusCode: 200, body: JSON.stringify(result) };
+        // --- ATUALIZAÇÃO DO LIMITE DE USO ---
+        try {
+            await db.runTransaction(async (transaction) => {
+                const doc = await transaction.get(usageDocRef);
+                if (!doc.exists || doc.data()?.lastUsed !== today) {
+                    transaction.set(usageDocRef, { count: 1, lastUsed: today });
+                } else {
+                    const newCount = (doc.data()?.count || 0) + 1;
+                    transaction.update(usageDocRef, { count: newCount });
+                }
+            });
+        } catch (dbUpdateError) {
+            console.error("Erro ao ATUALIZAR o limite de uso no Firestore:", dbUpdateError);
+        }
 
+        return { statusCode: 200, body: JSON.stringify(responseBody) };
     } catch (error) {
-        console.error("Error in Gemini proxy function:", error);
-        return { statusCode: 500, body: JSON.stringify({ error: error.message || "Ocorreu um erro interno no servidor." }) };
+        console.error(`Erro na função proxy para a ação:`, error);
+        return {
+            statusCode: 500,
+            body: JSON.stringify({ error: 'Ocorreu um erro interno ao processar sua solicitação.' }),
+        };
     }
 };
