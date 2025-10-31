@@ -119,14 +119,28 @@ export const handler: Handler = async (event) => {
             case 'sendMessage':
                 const { internId, systemInstruction, message, history, files } = payload;
                 
-                const contents: Content[] = history.map((msg: Message) => {
-                    const parts: Part[] = [];
-                    if (msg.content) { parts.push({ text: msg.content }); }
-                    if (msg.files) {
-                        msg.files.forEach(file => parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } }));
-                    }
-                    return { role: msg.role, parts };
-                }).filter(content => content.parts.length > 0);
+                // Mapeamento e filtragem robustos do histórico
+                const contents: Content[] = history
+                    .filter((msg: Message | null): msg is Message => 
+                        msg != null && 
+                        typeof msg.role === 'string' &&
+                        // FIX: Garante que o conteúdo de texto não seja apenas espaços em branco
+                        ((typeof msg.content === 'string' && msg.content.trim() !== '') || (Array.isArray(msg.files) && msg.files.length > 0))
+                    )
+                    .map((msg: Message) => {
+                        const parts: Part[] = [];
+                        if (msg.content && msg.content.trim() !== '') { 
+                            parts.push({ text: msg.content }); 
+                        }
+                        if (msg.files) {
+                            msg.files.forEach(file => {
+                                if(file && file.mimeType && file.data) {
+                                    parts.push({ inlineData: { mimeType: file.mimeType, data: file.data } });
+                                }
+                            });
+                        }
+                        return { role: msg.role, parts };
+                    }).filter((content: Content) => content.parts.length > 0);
 
                 const userParts: Part[] = [];
                 if (message) { userParts.push({ text: message }); }
@@ -138,6 +152,8 @@ export const handler: Handler = async (event) => {
                     contents.push({ role: 'user', parts: userParts });
                 }
 
+                // A API Gemini espera que a conversa comece com um 'user'.
+                // Removemos a saudação inicial do modelo para garantir a conformidade.
                 if (contents.length > 0 && contents[0].role === 'model') {
                     contents.shift();
                 }
